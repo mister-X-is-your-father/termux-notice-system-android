@@ -1,0 +1,16 @@
+# ディレクトリ名の表示形式: basename / fullpath
+CWD_STYLE=basename
+
+# メッセージ詳細を表示: true / false
+SHOW_MESSAGE=true
+
+# 通知音: true / false
+NOTIFY_SOUND=true
+
+# 通知の優先度: min / low / default / high / max
+NOTIFY_PRIORITY=high
+
+# リモート通知の SSH 設定
+REMOTE_HOST=neo@leo
+REMOTE_PORT=5963
+TUNNEL_PORT=28022
