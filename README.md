@@ -42,6 +42,11 @@ termux-notification --title "タイトル" --content "本文" --sound
 5. [試行錯誤の記録（失敗から学ぶ）](#試行錯誤の記録失敗から学ぶ)
 6. [代替手段](#代替手段)
 7. [リモートからの通知送信](#リモートからの通知送信)
+   - [アーキテクチャ](#アーキテクチャ)
+   - [セットアップ手順](#セットアップ手順)
+   - [使い方（実践例）](#使い方実践例)
+   - [トンネルの維持と自動再接続](#トンネルの維持と自動再接続)
+   - [セキュリティに関する注意](#セキュリティに関する注意)
 8. [トラブルシューティング](#トラブルシューティング)
 
 ---
@@ -361,30 +366,186 @@ termux-wake-unlock  # 解除
 
 ## リモートからの通知送信
 
-SSH 経由でリモートサーバーから Termux 端末に通知を送ることができる。
+リモートサーバーから Termux 端末の Android 通知を発火させる仕組み。
+Termux（スマホ）はグローバル IP を持たないことが多いため、**リバース SSH トンネル** を使って
+リモートサーバーからの接続を実現する。
+
+### アーキテクチャ
+
+```
++----------------------------+          +----------------------------+
+| Remote Server (leo)        |          | Android (Termux)           |
+|                            |          |                            |
+|  ssh -p 28022 localhost    |          |  sshd (port 8022)          |
+|       |                    |          |       ^                    |
+|       v                    |          |       |                    |
+|  localhost:28022 --------(reverse SSH tunnel)--+                   |
+|                            |          |                            |
+|                            |          |  termux-notification       |
+|                            |          |       |                    |
+|                            |          |       v                    |
+|                            |          |  Termux:API → Android通知  |
++----------------------------+          +----------------------------+
+
+  Termux → ssh -R 28022:localhost:8022 → Remote Server
+  (トンネルを張る方向: Termux → Remote)
+  (通知コマンドの方向: Remote → Termux)
+```
+
+### 仕組み
+
+1. Termux 側で `sshd` を起動（ポート 8022）
+2. Termux からリモートサーバーに SSH 接続し、`-R` オプションでリバーストンネルを張る
+3. リモートサーバーが `localhost:28022` に SSH すると、トンネル経由で Termux の `sshd` に到達
+4. リモートサーバーから `termux-notification` コマンドを実行 → Android 通知が発火
+
+**ポイント**: Termux がグローバル IP を持たなくても、Termux 側からトンネルを張るため接続できる。
+
+### セットアップ手順
+
+#### Step 1: Termux で SSH サーバーを準備
 
 ```bash
-# リモートサーバーから Termux に SSH して通知を送る
-ssh -p <port> user@termux-device \
+# openssh がなければインストール
+pkg install openssh
+
+# sshd を起動（デフォルトポート 8022）
+sshd
+
+# 起動確認
+pgrep -a sshd
+```
+
+Termux の sshd はパスワード認証がデフォルトで無効。公開鍵認証のみ。
+
+#### Step 2: リモートサーバーの公開鍵を Termux に登録
+
+```bash
+# リモートサーバーの公開鍵を取得して authorized_keys に追加
+ssh -p <remote-port> user@remote-server "cat ~/.ssh/id_ed25519.pub" \
+  >> ~/.ssh/authorized_keys
+
+# パーミッション設定
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+```
+
+#### Step 3: リバース SSH トンネルを張る
+
+```bash
+# Termux から実行
+# -R 28022:localhost:8022 = リモートの 28022 番ポートを Termux の 8022 に転送
+# -f = バックグラウンド実行
+# -N = リモートコマンドなし（トンネルのみ）
+ssh -p <remote-port> -f -N -R 28022:localhost:8022 user@remote-server
+```
+
+| パラメータ | 意味 |
+|-----------|------|
+| `-R 28022:localhost:8022` | リモートの 28022 → Termux の 8022 |
+| `-f` | バックグラウンドで実行 |
+| `-N` | シェルを開かずトンネルだけ維持 |
+| `28022` | リモート側のリッスンポート（任意、衝突しない番号） |
+| `8022` | Termux の sshd ポート |
+
+#### Step 4: リモートサーバーから通知を送信
+
+```bash
+# リモートサーバーで実行
+ssh -p 28022 localhost \
   'termux-notification --title "Remote Alert" --content "サーバーからの通知" --sound'
 ```
 
-### Eternal Terminal (et) 経由の場合
+### 使い方（実践例）
+
+#### 基本的なリモート通知
 
 ```bash
-# ET 接続先の Termux に対して
-ssh -p <port> user@termux-host 'termux-notification --title "ET Alert" --content "メッセージ"'
+# リモートサーバーから
+ssh -p 28022 localhost \
+  'termux-notification --title "From Server" --content "リモート通知成功！" --sound --vibrate 500,200,500'
 ```
 
-### CI/CD パイプラインでの活用例
+#### 長時間タスク完了通知
 
 ```bash
-# GitHub Actions や Jenkins の最後に
-ssh user@phone 'termux-notification \
-  --title "CI: Build #$BUILD_NUMBER" \
-  --content "$STATUS" \
-  --sound \
-  --action "termux-open $BUILD_URL"'
+# リモートサーバーでビルドやデプロイ後に通知
+make build && \
+ssh -p 28022 localhost \
+  'termux-notification --title "Build Complete" --content "ビルド成功" --sound --priority high' || \
+ssh -p 28022 localhost \
+  'termux-notification --title "Build Failed" --content "ビルド失敗！確認してください" --sound --priority max'
+```
+
+#### CI/CD パイプラインでの活用
+
+```bash
+# GitHub Actions や Jenkins のジョブ末尾に
+ssh -p 28022 localhost \
+  "termux-notification \
+    --title \"CI: Build #${BUILD_NUMBER}\" \
+    --content \"${STATUS}: ${REPO}@${BRANCH}\" \
+    --sound \
+    --action \"termux-open ${BUILD_URL}\""
+```
+
+#### ワンライナー：ローカルから leo 経由で自分に通知
+
+```bash
+# Termux から実行（自分自身に leo 経由で通知を送る）
+ssh -p 5963 neo@leo \
+  "ssh -p 28022 localhost 'termux-notification --title \"Round Trip\" --content \"Termux→leo→Termux 往復通知\" --sound'"
+```
+
+### トンネルの維持と自動再接続
+
+トンネルはネットワーク切断で切れる。`autossh` で自動再接続できる。
+
+```bash
+# autossh をインストール
+pkg install autossh
+
+# 自動再接続付きトンネル
+# -M 0 = autossh の監視ポートを無効化（ServerAliveInterval に任せる）
+autossh -M 0 -f -N \
+  -o "ServerAliveInterval 30" \
+  -o "ServerAliveCountMax 3" \
+  -R 28022:localhost:8022 \
+  -p <remote-port> user@remote-server
+```
+
+#### Termux:Boot で起動時に自動接続
+
+1. F-Droid から **Termux:Boot** をインストール（署名一致に注意）
+2. `~/.termux/boot/` にスクリプトを配置
+
+```bash
+mkdir -p ~/.termux/boot
+cat > ~/.termux/boot/reverse-tunnel.sh << 'SCRIPT'
+#!/data/data/com.termux/files/usr/bin/bash
+sshd
+sleep 2
+autossh -M 0 -f -N \
+  -o "ServerAliveInterval 30" \
+  -o "ServerAliveCountMax 3" \
+  -R 28022:localhost:8022 \
+  -p <remote-port> user@remote-server
+SCRIPT
+chmod +x ~/.termux/boot/reverse-tunnel.sh
+```
+
+### セキュリティに関する注意
+
+- リバーストンネルのポート（28022）はリモートサーバーの `localhost` にしかバインドされない（デフォルト）
+- リモートサーバーの `GatewayPorts no`（デフォルト）を変更しないこと
+- Termux の `sshd` は公開鍵認証のみ。パスワード認証を有効にしないこと
+- 信頼できるサーバーにのみトンネルを張ること
+- 不要になったトンネルは `kill` で停止する
+
+```bash
+# トンネルプロセスの確認と停止
+pgrep -af "ssh.*-R.*28022"
+kill <pid>
 ```
 
 ---
@@ -436,6 +597,39 @@ setsid bash -c 'termux-notification --title "test" --content "hello"'
 ```bash
 chmod 444 my.dex
 dalvikvm -cp my.dex MyClass
+```
+
+### Q: リバーストンネルが切れている
+
+**A**: トンネルプロセスが生きているか確認。死んでいたら再接続。
+
+```bash
+# プロセス確認
+pgrep -af "ssh.*-R.*28022"
+
+# なければ再接続
+ssh -p <remote-port> -f -N -R 28022:localhost:8022 user@remote-server
+```
+
+自動再接続が必要なら `autossh` を使う（[トンネルの維持と自動再接続](#トンネルの維持と自動再接続)参照）。
+
+### Q: リモートから ssh -p 28022 localhost で接続拒否される
+
+**A**: 以下を順番にチェック：
+
+1. Termux 側で `sshd` が起動しているか → `pgrep -a sshd`
+2. トンネルが張れているか → `pgrep -af "ssh.*-R"`
+3. リモートの公開鍵が Termux の `~/.ssh/authorized_keys` に登録されているか
+4. Termux 側の `~/.ssh/authorized_keys` のパーミッションが `600` か
+
+### Q: リモートから通知コマンドは成功するのに通知が出ない
+
+**A**: SSH 経由で実行される `termux-notification` は環境変数が不足する可能性がある。
+以下で PATH を明示的に設定：
+
+```bash
+ssh -p 28022 localhost \
+  'export PATH=/data/data/com.termux/files/usr/bin:$PATH; termux-notification --title "test" --content "hello"'
 ```
 
 ---
