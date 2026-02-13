@@ -592,9 +592,10 @@ Claude Code（フックイベント発火）
 
 **ディレクトリ名は常に通知タイトルに含まれる**。メッセージ詳細の表示は設定で切り替え可能。
 
-**重複防止**: `idle_prompt` と `Stop` は同じ通知 ID（`claude-status`）を使うため、
-連続で発火しても通知は**上書き**されて 1 つにまとまる。
-`permission_prompt` だけは別 ID（`claude-perm`）で、ステータス通知に上書きされない。
+**重複防止**: 全通知に `--id` と `--alert-once` を付与。
+同じ ID の通知は**上書き**され、**音・バイブは初回のみ**（再発火ではサイレント更新）。
+`idle_prompt` / `Stop` は同一 ID `claude-status` で 1 つにまとまり、
+`permission_prompt` は別 ID `claude-perm` でステータス通知に上書きされない。
 
 ### 設定ファイル
 
@@ -636,7 +637,7 @@ TUNNEL_PORT=28022           # default: 28022
 2. **stdin から JSON を読み取り**、`python3` でパース（`jq` 不要）
 3. **`cwd` からディレクトリ名を抽出** し、通知タイトルに常に含める
 4. `notification_type` と `hook_event_name` で通知内容を場合分け
-5. **通知 ID による重複防止**: `idle_prompt` / `Stop` は同じ ID `claude-status` を使い、連続発火時は上書き。`permission_prompt` だけ別 ID `claude-perm` で独立表示
+5. **通知 ID + alert-once による重複防止**: 全通知に `--id` と `--alert-once` を付与。同じ ID への再発火は**サイレント上書き**（音は初回のみ）。`idle_prompt` / `Stop` は ID `claude-status`、`permission_prompt` は ID `claude-perm` で独立
 6. `SHOW_MESSAGE` 設定に応じて **メッセージ詳細の表示を切り替え**
 7. **環境を自動判定**:
    - `termux-notification` が PATH にある → Termux 上なので `setsid` 経由で直接実行
@@ -759,7 +760,7 @@ MSG=$(echo "$MSG" | head -c 200)
 # --- 通知コマンド組み立て ---
 TITLE_ESC=${TITLE//\'/\'\\\'\'}
 MSG_ESC=${MSG//\'/\'\\\'\'}
-NOTIF_CMD="termux-notification --id '${NOTIF_ID}' --title '${TITLE_ESC}'"
+NOTIF_CMD="termux-notification --id '${NOTIF_ID}' --alert-once --title '${TITLE_ESC}'"
 [ -n "$MSG_ESC" ] && NOTIF_CMD="$NOTIF_CMD --content '${MSG_ESC}'"
 [ "$NOTIFY_SOUND" = "true" ] && NOTIF_CMD="$NOTIF_CMD --sound"
 NOTIF_CMD="$NOTIF_CMD --priority ${NOTIFY_PRIORITY}"
