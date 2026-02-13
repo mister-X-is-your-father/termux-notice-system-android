@@ -762,6 +762,7 @@ NOTIF_CMD="termux-notification ${NOTIF_OPT} --title '${TITLE_ESC}'"
 [ -n "$MSG_ESC" ] && NOTIF_CMD="$NOTIF_CMD --content '${MSG_ESC}'"
 [ "$NOTIFY_SOUND" = "true" ] && NOTIF_CMD="$NOTIF_CMD --sound"
 NOTIF_CMD="$NOTIF_CMD --priority ${NOTIFY_PRIORITY}"
+NOTIF_CMD="$NOTIF_CMD --action 'am start -n com.termux/.app.TermuxActivity'"
 
 # --- 実行 ---
 if command -v termux-notification >/dev/null 2>&1; then
