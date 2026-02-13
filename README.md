@@ -592,9 +592,9 @@ Claude Code（フックイベント発火）
 
 **ディレクトリ名は常に通知タイトルに含まれる**。メッセージ詳細の表示は設定で切り替え可能。
 
-各イベントは独立した通知として発行される。確認待ち中に繰り返し通知が来る場合は
-Android の通知設定で Termux チャンネルをサイレントにするか、
-`termux-notify.conf` で `NOTIFY_SOUND=false` にする。
+`permission_prompt` は確認待ち中に繰り返し発火するため `--id` + `--alert-once` で
+**初回のみ音を鳴らし、以降はサイレント上書き**する。
+`idle_prompt` / `Stop` は `--id` なしで毎回独立した通知として発行される。
 
 ### 設定ファイル
 
@@ -636,7 +636,7 @@ TUNNEL_PORT=28022           # default: 28022
 2. **stdin から JSON を読み取り**、`python3` でパース（`jq` 不要）
 3. **`cwd` からディレクトリ名を抽出** し、通知タイトルに常に含める
 4. `notification_type` と `hook_event_name` で通知内容を場合分け
-5. 各イベントを**独立した通知として発行**（上書きなし）
+5. **`permission_prompt` のみ `--id` + `--alert-once`** で初回だけ音を鳴らし、再発火はサイレント上書き。他のイベントは毎回独立した通知
 6. `SHOW_MESSAGE` 設定に応じて **メッセージ詳細の表示を切り替え**
 7. **環境を自動判定**:
    - `termux-notification` が PATH にある → Termux 上なので `setsid` 経由で直接実行
@@ -710,11 +710,15 @@ if [ -n "$CWD" ]; then
 fi
 
 # --- 通知内容の組み立て ---
+# permission_prompt: 確認待ち中に繰り返し発火するため --id + --alert-once で初回のみ音を鳴らす
+# それ以外: 毎回独立した通知（--id なし）
+NOTIF_OPT=""
 case "$NOTIF_TYPE" in
   permission_prompt)
     ICON="🔐"
     LABEL="確認待ち"
     MSG="${MSG_RAW:-パーミッション確認}"
+    NOTIF_OPT="--id 'claude-perm' --alert-once"
     ;;
   idle_prompt)
     ICON="✅"
@@ -754,7 +758,7 @@ MSG=$(echo "$MSG" | head -c 200)
 # --- 通知コマンド組み立て ---
 TITLE_ESC=${TITLE//\'/\'\\\'\'}
 MSG_ESC=${MSG//\'/\'\\\'\'}
-NOTIF_CMD="termux-notification --title '${TITLE_ESC}'"
+NOTIF_CMD="termux-notification ${NOTIF_OPT} --title '${TITLE_ESC}'"
 [ -n "$MSG_ESC" ] && NOTIF_CMD="$NOTIF_CMD --content '${MSG_ESC}'"
 [ "$NOTIFY_SOUND" = "true" ] && NOTIF_CMD="$NOTIF_CMD --sound"
 NOTIF_CMD="$NOTIF_CMD --priority ${NOTIFY_PRIORITY}"
