@@ -592,6 +592,10 @@ Claude Code（フックイベント発火）
 
 **ディレクトリ名は常に通知タイトルに含まれる**。メッセージ詳細の表示は設定で切り替え可能。
 
+**重複防止**: `idle_prompt` と `Stop` は同じ通知 ID（`claude-status`）を使うため、
+連続で発火しても通知は**上書き**されて 1 つにまとまる。
+`permission_prompt` だけは別 ID（`claude-perm`）で、ステータス通知に上書きされない。
+
 ### 設定ファイル
 
 `~/.claude/hooks/termux-notify.conf` で通知の表示内容や動作をカスタマイズできる。
@@ -632,12 +636,13 @@ TUNNEL_PORT=28022           # default: 28022
 2. **stdin から JSON を読み取り**、`python3` でパース（`jq` 不要）
 3. **`cwd` からディレクトリ名を抽出** し、通知タイトルに常に含める
 4. `notification_type` と `hook_event_name` で通知内容を場合分け
-5. `SHOW_MESSAGE` 設定に応じて **メッセージ詳細の表示を切り替え**
-6. **環境を自動判定**:
+5. **通知 ID による重複防止**: `idle_prompt` / `Stop` は同じ ID `claude-status` を使い、連続発火時は上書き。`permission_prompt` だけ別 ID `claude-perm` で独立表示
+6. `SHOW_MESSAGE` 設定に応じて **メッセージ詳細の表示を切り替え**
+7. **環境を自動判定**:
    - `termux-notification` が PATH にある → Termux 上なので `setsid` 経由で直接実行
    - なければ → SSH リレー（設定ファイルの接続先を使用）
-7. **バックグラウンド実行**（`&`）で即座にリターンし、Claude Code のフロー処理をブロックしない
-8. SSH 失敗は `/dev/null` に捨てるため、ネットワーク断でもエラーにならない
+8. **バックグラウンド実行**（`&`）で即座にリターンし、Claude Code のフロー処理をブロックしない
+9. SSH 失敗は `/dev/null` に捨てるため、ネットワーク断でもエラーにならない
 
 **注意**: JSON パースに `python3` を使用。`jq` は環境によってインストールされていないため避けた。
 
@@ -705,16 +710,19 @@ if [ -n "$CWD" ]; then
 fi
 
 # --- 通知内容の組み立て ---
+# NOTIF_ID: permission_prompt は別 ID、それ以外は同一 ID で上書き（重複防止）
 case "$NOTIF_TYPE" in
   permission_prompt)
     ICON="🔐"
     LABEL="確認待ち"
     MSG="${MSG_RAW:-パーミッション確認}"
+    NOTIF_ID="claude-perm"
     ;;
   idle_prompt)
     ICON="✅"
     LABEL="完了"
     MSG="${MSG_RAW:-入力待ちです}"
+    NOTIF_ID="claude-status"
     ;;
   *)
     case "$HOOK_EVENT" in
@@ -722,11 +730,13 @@ case "$NOTIF_TYPE" in
         ICON="⏹"
         LABEL="処理完了"
         MSG="${MSG_RAW:-停止しました}"
+        NOTIF_ID="claude-status"
         ;;
       *)
         ICON="💬"
         LABEL="通知"
         MSG="${MSG_RAW:-通知}"
+        NOTIF_ID="claude-status"
         ;;
     esac
     ;;
@@ -749,7 +759,7 @@ MSG=$(echo "$MSG" | head -c 200)
 # --- 通知コマンド組み立て ---
 TITLE_ESC=${TITLE//\'/\'\\\'\'}
 MSG_ESC=${MSG//\'/\'\\\'\'}
-NOTIF_CMD="termux-notification --title '${TITLE_ESC}'"
+NOTIF_CMD="termux-notification --id '${NOTIF_ID}' --title '${TITLE_ESC}'"
 [ -n "$MSG_ESC" ] && NOTIF_CMD="$NOTIF_CMD --content '${MSG_ESC}'"
 [ "$NOTIFY_SOUND" = "true" ] && NOTIF_CMD="$NOTIF_CMD --sound"
 NOTIF_CMD="$NOTIF_CMD --priority ${NOTIFY_PRIORITY}"
