@@ -47,7 +47,14 @@ termux-notification --title "タイトル" --content "本文" --sound
    - [使い方（実践例）](#使い方実践例)
    - [トンネルの維持と自動再接続](#トンネルの維持と自動再接続)
    - [セキュリティに関する注意](#セキュリティに関する注意)
-8. [トラブルシューティング](#トラブルシューティング)
+8. [Claude Code フック連携](#claude-code-フック連携)
+   - [概要](#概要)
+   - [通知の表示例](#通知の表示例)
+   - [設定ファイル](#設定ファイル)
+   - [通知スクリプトの仕組み](#通知スクリプトの仕組み)
+   - [セットアップ](#セットアップ)
+   - [動作確認](#動作確認)
+9. [トラブルシューティング](#トラブルシューティング)
 
 ---
 
@@ -550,6 +557,283 @@ kill <pid>
 
 ---
 
+## Claude Code フック連携
+
+Claude Code のフック機能（`Notification` / `Stop` イベント）を使い、
+パーミッション確認待ちや処理完了を **Android 通知で自動的に受け取る** 仕組み。
+
+通知には **作業ディレクトリ名**（プロジェクト名）が常に含まれ、
+完了内容や確認内容などの詳細情報も設定ファイルで表示を切り替えられる。
+
+### 概要
+
+```
+Claude Code（フックイベント発火）
+  │  stdin: JSON {hook_event_name, notification_type, message, cwd, ...}
+  v
+~/.claude/hooks/termux-notify.sh
+  │  ← ~/.claude/hooks/termux-notify.conf（設定読み込み）
+  │
+  ├─ Termux 上で実行中 → setsid termux-notification（直接）
+  │
+  └─ リモートサーバー上 → SSH: local → leo → Termux（リレー）
+                                          └→ termux-notification
+```
+
+### 通知の表示例
+
+作業ディレクトリが `/home/neo/my-web-app` の場合：
+
+| フックイベント | notification_type | 通知タイトル | 通知メッセージ |
+|---------------|-------------------|-------------|---------------|
+| Notification | `permission_prompt` | 🔐 my-web-app - 確認待ち | `Bash: npm install express` |
+| Notification | `idle_prompt` | ✅ my-web-app - 完了 | メッセージまたは「入力待ちです」 |
+| Stop | — | ⏹ my-web-app - 処理完了 | メッセージまたは「停止しました」 |
+
+**ディレクトリ名は常に通知タイトルに含まれる**。メッセージ詳細の表示は設定で切り替え可能。
+
+### 設定ファイル
+
+`~/.claude/hooks/termux-notify.conf` で通知の表示内容や動作をカスタマイズできる。
+
+```bash
+# ~/.claude/hooks/termux-notify.conf
+# 各項目のデフォルト値は右のコメント参照
+
+# ディレクトリ名の表示形式
+#   basename  : プロジェクト名のみ（例: my-web-app）
+#   fullpath  : フルパス（例: /home/neo/my-web-app）
+CWD_STYLE=basename          # default: basename
+
+# メッセージ詳細を通知に含めるか
+#   true  : コマンド内容や完了メッセージを表示
+#   false : タイトルのみ（ディレクトリ名 + イベント種別）
+SHOW_MESSAGE=true           # default: true
+
+# 通知音を鳴らすか
+NOTIFY_SOUND=true           # default: true
+
+# 通知の優先度: min / low / default / high / max
+NOTIFY_PRIORITY=high        # default: high
+
+# リモート通知の SSH 設定（Termux 以外の環境用）
+REMOTE_HOST=neo@leo         # default: neo@leo
+REMOTE_PORT=5963            # default: 5963
+TUNNEL_PORT=28022           # default: 28022
+```
+
+設定ファイルがない場合はデフォルト値で動作する。項目を省略した場合もデフォルト値が使われる。
+
+### 通知スクリプトの仕組み
+
+`~/.claude/hooks/termux-notify.sh` は以下のように動作する。
+
+1. **設定ファイルを読み込み**（`~/.claude/hooks/termux-notify.conf`、存在しない場合はデフォルト値）
+2. **stdin から JSON を読み取り**、`python3` でパース（`jq` 不要）
+3. **`cwd` からディレクトリ名を抽出** し、通知タイトルに常に含める
+4. `notification_type` と `hook_event_name` で通知内容を場合分け
+5. `SHOW_MESSAGE` 設定に応じて **メッセージ詳細の表示を切り替え**
+6. **環境を自動判定**:
+   - `termux-notification` が PATH にある → Termux 上なので `setsid` 経由で直接実行
+   - なければ → SSH リレー（設定ファイルの接続先を使用）
+7. **バックグラウンド実行**（`&`）で即座にリターンし、Claude Code のフロー処理をブロックしない
+8. SSH 失敗は `/dev/null` に捨てるため、ネットワーク断でもエラーにならない
+
+**注意**: JSON パースに `python3` を使用。`jq` は環境によってインストールされていないため避けた。
+
+### セットアップ
+
+#### 1. 設定ファイルを作成
+
+```bash
+mkdir -p ~/.claude/hooks
+cat > ~/.claude/hooks/termux-notify.conf << 'CONF'
+# ディレクトリ名の表示形式: basename / fullpath
+CWD_STYLE=basename
+
+# メッセージ詳細を表示: true / false
+SHOW_MESSAGE=true
+
+# 通知音: true / false
+NOTIFY_SOUND=true
+
+# 通知の優先度: min / low / default / high / max
+NOTIFY_PRIORITY=high
+
+# リモート通知の SSH 設定
+REMOTE_HOST=neo@leo
+REMOTE_PORT=5963
+TUNNEL_PORT=28022
+CONF
+```
+
+#### 2. 通知スクリプトを配置
+
+```bash
+cat > ~/.claude/hooks/termux-notify.sh << 'HOOKSCRIPT'
+#!/bin/bash
+INPUT=$(cat)
+
+# --- 設定読み込み ---
+CONF="${HOME}/.claude/hooks/termux-notify.conf"
+CWD_STYLE=basename
+SHOW_MESSAGE=true
+NOTIFY_SOUND=true
+NOTIFY_PRIORITY=high
+REMOTE_HOST=neo@leo
+REMOTE_PORT=5963
+TUNNEL_PORT=28022
+[ -f "$CONF" ] && source "$CONF"
+
+# --- JSON パース ---
+json_get() {
+  echo "$INPUT" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('$1',''))" 2>/dev/null
+}
+
+HOOK_EVENT=$(json_get hook_event_name)
+NOTIF_TYPE=$(json_get notification_type)
+MSG_RAW=$(json_get message)
+CWD=$(json_get cwd)
+
+# --- ディレクトリ名（常に取得） ---
+if [ -n "$CWD" ]; then
+  if [ "$CWD_STYLE" = "fullpath" ]; then
+    DIR_LABEL="$CWD"
+  else
+    DIR_LABEL=$(basename "$CWD")
+  fi
+fi
+
+# --- 通知内容の組み立て ---
+case "$NOTIF_TYPE" in
+  permission_prompt)
+    ICON="🔐"
+    LABEL="確認待ち"
+    MSG="${MSG_RAW:-パーミッション確認}"
+    ;;
+  idle_prompt)
+    ICON="✅"
+    LABEL="完了"
+    MSG="${MSG_RAW:-入力待ちです}"
+    ;;
+  *)
+    case "$HOOK_EVENT" in
+      Stop)
+        ICON="⏹"
+        LABEL="処理完了"
+        MSG="${MSG_RAW:-停止しました}"
+        ;;
+      *)
+        ICON="💬"
+        LABEL="通知"
+        MSG="${MSG_RAW:-通知}"
+        ;;
+    esac
+    ;;
+esac
+
+# --- タイトル（ディレクトリ名は常に含める） ---
+if [ -n "$DIR_LABEL" ]; then
+  TITLE="${ICON} ${DIR_LABEL} - ${LABEL}"
+else
+  TITLE="${ICON} ${LABEL}"
+fi
+
+# --- メッセージ表示の制御 ---
+[ "$SHOW_MESSAGE" != "true" ] && MSG=""
+
+# --- 文字数制限 ---
+TITLE=$(echo "$TITLE" | head -c 100)
+MSG=$(echo "$MSG" | head -c 200)
+
+# --- 通知コマンド組み立て ---
+TITLE_ESC=${TITLE//\'/\'\\\'\'}
+MSG_ESC=${MSG//\'/\'\\\'\'}
+NOTIF_CMD="termux-notification --title '${TITLE_ESC}'"
+[ -n "$MSG_ESC" ] && NOTIF_CMD="$NOTIF_CMD --content '${MSG_ESC}'"
+[ "$NOTIFY_SOUND" = "true" ] && NOTIF_CMD="$NOTIF_CMD --sound"
+NOTIF_CMD="$NOTIF_CMD --priority ${NOTIFY_PRIORITY}"
+
+# --- 実行 ---
+if command -v termux-notification >/dev/null 2>&1; then
+  setsid bash -c "$NOTIF_CMD" >/dev/null 2>&1 &
+else
+  ssh -p "$REMOTE_PORT" -o ConnectTimeout=3 -o StrictHostKeyChecking=no "$REMOTE_HOST" \
+    "ssh -p $TUNNEL_PORT -o ConnectTimeout=3 localhost \"$NOTIF_CMD\"" >/dev/null 2>&1 &
+fi
+HOOKSCRIPT
+chmod +x ~/.claude/hooks/termux-notify.sh
+```
+
+#### 3. グローバル設定に登録
+
+`~/.claude/settings.json` の `hooks` セクションに追加。既存のフック（ベル音や tmux 色変更）はそのまま残し、`hooks` 配列に **エントリを追加** する。
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "（既存のベル音フック）" },
+          { "type": "command", "command": "~/.claude/hooks/termux-notify.sh" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "（既存の tmux / タスクAPI フック）" },
+          { "type": "command", "command": "~/.claude/hooks/termux-notify.sh" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 動作確認
+
+```bash
+# 1. cwd 付き idle_prompt テスト
+echo '{"notification_type":"idle_prompt","message":"ファイルの変更が完了しました","cwd":"/home/neo/my-web-app"}' \
+  | ~/.claude/hooks/termux-notify.sh
+# → タイトル: ✅ my-web-app - 完了 / 本文: ファイルの変更が完了しました
+
+# 2. permission_prompt テスト
+echo '{"notification_type":"permission_prompt","message":"Bash: npm install express","cwd":"/home/neo/my-web-app"}' \
+  | ~/.claude/hooks/termux-notify.sh
+# → タイトル: 🔐 my-web-app - 確認待ち / 本文: Bash: npm install express
+
+# 3. Stop イベントテスト
+echo '{"hook_event_name":"Stop","cwd":"/home/neo/my-web-app"}' \
+  | ~/.claude/hooks/termux-notify.sh
+# → タイトル: ⏹ my-web-app - 処理完了 / 本文: 停止しました
+
+# 4. SHOW_MESSAGE=false で本文なし確認
+sed -i 's/SHOW_MESSAGE=true/SHOW_MESSAGE=false/' ~/.claude/hooks/termux-notify.conf
+echo '{"notification_type":"idle_prompt","message":"テスト","cwd":"/home/neo/project"}' \
+  | ~/.claude/hooks/termux-notify.sh
+# → タイトル: ✅ project - 完了 / 本文: なし
+sed -i 's/SHOW_MESSAGE=false/SHOW_MESSAGE=true/' ~/.claude/hooks/termux-notify.conf
+
+# 5. fullpath 表示テスト
+sed -i 's/CWD_STYLE=basename/CWD_STYLE=fullpath/' ~/.claude/hooks/termux-notify.conf
+echo '{"notification_type":"idle_prompt","cwd":"/home/neo/my-web-app"}' \
+  | ~/.claude/hooks/termux-notify.sh
+# → タイトル: ✅ /home/neo/my-web-app - 完了
+sed -i 's/CWD_STYLE=fullpath/CWD_STYLE=basename/' ~/.claude/hooks/termux-notify.conf
+
+# 6. 実際の Claude Code セッションで確認
+#    - AskUserQuestion やパーミッション確認で 🔐 [プロジェクト名] - 確認待ち
+#    - 処理が終わって入力待ちになると ✅ [プロジェクト名] - 完了
+#    - セッション終了で ⏹ [プロジェクト名] - 処理完了
+```
+
+---
+
 ## トラブルシューティング
 
 ### Q: termux-notification が何も起きない
@@ -630,6 +914,52 @@ ssh -p <remote-port> -f -N -R 28022:localhost:8022 user@remote-server
 ```bash
 ssh -p 28022 localhost \
   'export PATH=/data/data/com.termux/files/usr/bin:$PATH; termux-notification --title "test" --content "hello"'
+```
+
+### Q: フックスクリプトで通知が来ない
+
+**A**: まず単体テストで切り分ける。
+
+```bash
+# スクリプトをデバッグモードで実行（cwd 付きで）
+echo '{"notification_type":"idle_prompt","cwd":"/home/neo/test"}' | bash -x ~/.claude/hooks/termux-notify.sh
+```
+
+よくある原因:
+- `python3` がインストールされていない → `which python3` で確認
+- SSH リレー先のトンネルが切れている → [リバーストンネルが切れている](#q-リバーストンネルが切れている) 参照
+- スクリプトに実行権限がない → `chmod +x ~/.claude/hooks/termux-notify.sh`
+- 設定ファイルの構文エラー → `bash -n ~/.claude/hooks/termux-notify.conf` で確認
+
+### Q: 設定ファイルの変更が反映されない
+
+**A**: 設定ファイルはフック実行のたびに読み込まれるため、変更は即座に反映される。
+以下を確認：
+
+1. ファイルパスが `~/.claude/hooks/termux-notify.conf` であること
+2. 構文エラーがないこと（`bash -n` で検証）
+3. 値にスペースや引用符が混入していないこと
+
+```bash
+# 構文チェック
+bash -n ~/.claude/hooks/termux-notify.conf
+
+# 現在の設定を確認
+cat ~/.claude/hooks/termux-notify.conf
+```
+
+### Q: フックが Claude Code の動作を遅くする
+
+**A**: スクリプトは全ての外部コマンドをバックグラウンド（`&`）で実行し即座にリターンする設計。
+遅延が発生する場合は SSH の `ConnectTimeout=3` を `1` に短縮するか、SSH 接続自体が問題なら
+`ControlMaster` で接続を使い回す。
+
+```bash
+# ~/.ssh/config に追加（SSH 接続の再利用）
+Host leo
+  ControlMaster auto
+  ControlPath ~/.ssh/sockets/%r@%h-%p
+  ControlPersist 600
 ```
 
 ---
